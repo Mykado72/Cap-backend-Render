@@ -3,11 +3,15 @@ const express    = require('express');
 const cors       = require('cors');
 const webpush    = require('web-push');
 const cron       = require('node-cron');
+const fs         = require('fs');
+const path       = require('path');
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT          = process.env.PORT || 3000;
 const VAPID_PUBLIC  = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY;
 const VAPID_EMAIL   = process.env.VAPID_EMAIL || 'mailto:admin@cap-app.fr';
+const SUBS_FILE     = path.join(__dirname, 'data', 'subscriptions.json');
 
 if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
   console.error('❌  Variables VAPID manquantes dans .env');
@@ -16,15 +20,18 @@ if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
 
 webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUBLIC, VAPID_PRIVATE);
 
-// ─── Persistence en mémoire (Render Free — pas de disque persistant) ──────────
-let _subs = [];
-
+// ─── Persistence JSON ─────────────────────────────────────────────────────────
 function loadSubs() {
-  return _subs;
+  try {
+    fs.mkdirSync(path.dirname(SUBS_FILE), { recursive: true });
+    if (!fs.existsSync(SUBS_FILE)) return [];
+    return JSON.parse(fs.readFileSync(SUBS_FILE, 'utf8'));
+  } catch { return []; }
 }
 
 function saveSubs(subs) {
-  _subs = subs;
+  fs.mkdirSync(path.dirname(SUBS_FILE), { recursive: true });
+  fs.writeFileSync(SUBS_FILE, JSON.stringify(subs, null, 2));
 }
 
 // ─── Express ──────────────────────────────────────────────────────────────────
@@ -46,51 +53,55 @@ app.get('/vapid-public-key', (_req, res) => {
 
 // S'abonner
 app.post('/subscribe', (req, res) => {
-  const { subscription, notifyAt } = req.body;
+  const { subscription, notifyAt, notifyAt2 } = req.body;
   if (!subscription?.endpoint || !notifyAt || !/^\d{2}:\d{2}$/.test(notifyAt)) {
     return res.status(400).json({ error: 'Données invalides' });
-	console.log(`Données invalides`);
+  }
+  if (notifyAt2 && !/^\d{2}:\d{2}$/.test(notifyAt2)) {
+    return res.status(400).json({ error: 'Format notifyAt2 invalide' });
   }
 
   let subs = loadSubs();
   const existing = subs.findIndex(s => s.subscription.endpoint === subscription.endpoint);
 
   if (existing >= 0) {
-    subs[existing].notifyAt = notifyAt;
+    subs[existing].notifyAt  = notifyAt;
+    subs[existing].notifyAt2 = notifyAt2 || '';
     subs[existing].updatedAt = new Date().toISOString();
   } else {
     subs.push({
       subscription,
       notifyAt,
+      notifyAt2: notifyAt2 || '',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
   }
 
   saveSubs(subs);
-  console.log(`✅ Abonné enregistré — notifyAt: ${notifyAt}`);
+  console.log(`✅ Abonné enregistré — notifyAt: ${notifyAt}${notifyAt2 ? ' · ' + notifyAt2 : ''}`);
   res.json({ ok: true });
 });
 
 // Mettre à jour l'heure seulement
 app.post('/update-time', (req, res) => {
-  const { endpoint, notifyAt } = req.body;
+  const { endpoint, notifyAt, notifyAt2 } = req.body;
   if (!endpoint || !notifyAt || !/^\d{2}:\d{2}$/.test(notifyAt)) {
     return res.status(400).json({ error: 'Données invalides' });
-	console.log(`Données invalides`);
+  }
+  if (notifyAt2 && !/^\d{2}:\d{2}$/.test(notifyAt2)) {
+    return res.status(400).json({ error: 'Format notifyAt2 invalide' });
   }
 
   let subs = loadSubs();
   const idx = subs.findIndex(s => s.subscription.endpoint === endpoint);
-  if (idx < 0)  { 
-	return res.status(404).json({ error: 'Abonné introuvable' });
-	console.log(`Abonné introuvable`);
-	}
+  if (idx < 0) return res.status(404).json({ error: 'Abonné introuvable' });
 
-  subs[idx].notifyAt = notifyAt;
+  subs[idx].notifyAt  = notifyAt;
+  subs[idx].notifyAt2 = notifyAt2 || '';
   subs[idx].updatedAt = new Date().toISOString();
   saveSubs(subs);
-  console.log(`🕐 Heure mise à jour — ${endpoint.slice(-20)}… → ${notifyAt}`);
+  console.log(`🕐 Heure mise à jour — ${endpoint.slice(-20)}… → ${notifyAt}${notifyAt2 ? ' · ' + notifyAt2 : ''}`);
   res.json({ ok: true });
 });
 
@@ -139,9 +150,10 @@ cron.schedule('* * * * *', async () => {
     minute: '2-digit',
     hour12: false
   });
-  
+
   let subs = loadSubs();
-  const targets = subs.filter(s => s.notifyAt === nowStr);
+  // Cibler les abonnés dont notifyAt OU notifyAt2 correspond à l'heure courante
+  const targets = subs.filter(s => s.notifyAt === nowStr || (s.notifyAt2 && s.notifyAt2 === nowStr));
   if (targets.length === 0) return;
 
   console.log(`🔔 ${nowStr} — Envoi à ${targets.length} abonné(s)`);
@@ -156,7 +168,6 @@ cron.schedule('* * * * *', async () => {
         badge: '/icons/icon-192.png',
         tag: 'cap-daily',
         renotify: true,
-        // data: { url: '/Cap/' }
       });
       console.log(`  ✅ ${entry.subscription.endpoint.slice(-20)}…`);
     } catch (err) {
