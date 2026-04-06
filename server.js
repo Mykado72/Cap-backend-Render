@@ -186,4 +186,15 @@ cron.schedule('* * * * *', async () => {
 app.listen(PORT, () => {
   console.log(`🚀 Cap! backend — port ${PORT}`);
   console.log(`📋 ${loadSubs().length} abonné(s) en base`);
+
+  // Garder le service éveillé sur Render (plan gratuit — s'endort après 15min)
+  const SELF_URL = process.env.RENDER_EXTERNAL_URL;
+  if (SELF_URL) {
+    setInterval(() => {
+      fetch(`${SELF_URL}/health`)
+        .then(() => console.log('🏓 Keep-alive ping OK'))
+        .catch(e => console.warn('🏓 Keep-alive ping failed:', e.message));
+    }, 10 * 60 * 1000); // toutes les 10 minutes
+    console.log(`🏓 Keep-alive activé → ${SELF_URL}/health`);
+  }
 });
